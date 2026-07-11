@@ -165,7 +165,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
     def infer_pytorch(
         self,
         input: dict[str, np.ndarray | None],
-        export_feat_layers: Sequence[int] | None = None,
+        export_feat_layers: Sequence[int] = [],
         infer_gs: bool = False,
         use_ray_pose: bool = False,
         ref_view_strategy: str = "saddle_balanced",
@@ -249,7 +249,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         process_res_method: str = "upper_bound_resize",
         export_dir: str | None = None,
         export_format: str = "mini_npz",
-        export_feat_layers: Sequence[int] | None = None,
+        export_feat_layers: Sequence[int] = [],
         # GLB export parameters
         conf_thresh_percentile: float = 40.0,
         num_max_points: int = 1_000_000,
@@ -440,9 +440,9 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
     def _run_model_forward(
         self,
         imgs: torch.Tensor,
-        ex_t: torch.Tensor | None,
-        in_t: torch.Tensor | None,
-        export_feat_layers: Sequence[int] | None = None,
+        ex_t: torch.Tensor,
+        in_t: torch.Tensor,
+        export_feat_layers: Sequence[int] = [],
         infer_gs: bool = False,
         use_ray_pose: bool = False,
         ref_view_strategy: str = "saddle_balanced",
@@ -453,8 +453,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         if need_sync:
             torch.cuda.synchronize(device)
         start_time = time.time()
-        feat_layers = list(export_feat_layers) if export_feat_layers is not None else None
-        output = self.forward(imgs, ex_t, in_t, feat_layers, infer_gs, use_ray_pose, ref_view_strategy)
+        output = self.forward(imgs, ex_t, in_t, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy)
         if need_sync:
             torch.cuda.synchronize(device)
         end_time = time.time()
