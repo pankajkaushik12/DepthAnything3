@@ -1,24 +1,24 @@
-pre-commit
+# pre-commit
 trimesh
-torch>=2
-torchvision
+# torch>=2
+# torchvision
 einops
 huggingface_hub
-imageio
-numpy<2
+# imageio
+numpy
 opencv-python
 xformers
-open3d
-fastapi
-uvicorn
-requests
+# open3d
+# fastapi
+# uvicorn
+# requests
 typer
-pillow
+# pillow
 omegaconf
 evo
-e3nn
-moviepy
+# e3nn
+moviepy==1.0.3
 plyfile
-pillow_heif
+# pillow_heif
 safetensors
 pycolmap
