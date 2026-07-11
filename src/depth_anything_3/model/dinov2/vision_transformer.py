@@ -321,14 +321,21 @@ class DinoVisionTransformer(nn.Module):
                 local_x = reorder_by_reference(local_x, b_idx)
 
             if self.alt_start != -1 and i == self.alt_start:
-                if kwargs.get("cam_token", None) is not None:
-                    logger.info("Using camera conditions provided by the user")
-                    cam_token = kwargs.get("cam_token")
-                else:
-                    ref_token = self.camera_token[:, :1].expand(B, -1, -1)
-                    src_token = self.camera_token[:, 1:].expand(B, S - 1, -1)
-                    cam_token = torch.cat([ref_token, src_token], dim=1)
-                x[:, :, 0] = cam_token
+                # Always generate the fallback token (learned parameters)
+                ref_token = self.camera_token[:, :1].expand(B, -1, -1)
+                src_token = self.camera_token[:, 1:].expand(B, S - 1, -1)
+                fallback_token = torch.cat([ref_token, src_token], dim=1)  # (B, S, embed_dim)
+
+                cam_token = kwargs.get("cam_token", None)
+                is_valid_cam = kwargs.get("is_valid_cam", None)
+
+                # Expand mask from (B, S) to (B, S, Embed_Dim) for torch.where
+                mask = is_valid_cam.unsqueeze(-1).expand_as(fallback_token)
+                    
+                # If valid, use cam_token. If invalid, use fallback_token.
+                final_cam_token = torch.where(mask, cam_token, fallback_token)
+
+                x = torch.cat([final_cam_token.unsqueeze(2), x[:, :, 1:]], dim=2)
 
             if self.alt_start != -1 and i >= self.alt_start and i % 2 == 1:
                 x = self.process_attention(

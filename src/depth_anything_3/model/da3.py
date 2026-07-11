@@ -100,8 +100,8 @@ class DepthAnything3Net(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        extrinsics: torch.Tensor | None = None,
-        intrinsics: torch.Tensor | None = None,
+        extrinsics: torch.Tensor,
+        intrinsics: torch.Tensor,
         export_feat_layers: list[int] | None = [],
         infer_gs: bool = False,
         use_ray_pose: bool = False,
@@ -122,15 +122,15 @@ class DepthAnything3Net(nn.Module):
         Returns:
             Dictionary containing predictions and auxiliary features
         """
+        # (B, N), Extract the mask using the -1.0 flag (Invalid intrinsics or extrinsics are marked with -1.0)
+        is_valid_cam = (extrinsics[..., 0, 0] != -1.0)
+
         # Extract features using backbone
-        if extrinsics is not None:
-            with torch.autocast(device_type=x.device.type, enabled=False):
-                cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
-        else:
-            cam_token = None
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
 
         feats, aux_feats = self.backbone(
-            x, cam_token=cam_token, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy
+            x, cam_token=cam_token, is_valid_cam=is_valid_cam, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy
         )
         # feats = [[item for item in feat] for feat in feats]
         H, W = x.shape[-2], x.shape[-1]
