@@ -32,7 +32,7 @@ from depth_anything_3.cfg import create_object, load_config
 from depth_anything_3.registry import MODEL_REGISTRY
 from depth_anything_3.specs import Prediction
 from depth_anything_3.utils.export import export
-from depth_anything_3.utils.geometry import affine_inverse
+from depth_anything_3.utils.geometry import affine_inverse, affine_inverse_np
 from depth_anything_3.utils.io.input_processor import InputProcessor
 from depth_anything_3.utils.io.output_processor import OutputProcessor
 from depth_anything_3.utils.logger import logger
@@ -130,6 +130,109 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
                     image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
                 )
 
+    def preprocess(
+        self,
+        image: list[np.ndarray | Image.Image | str],
+        extrinsics: np.ndarray | None = None,
+        intrinsics: np.ndarray | None = None,
+        process_res: int = 504,
+        process_res_method: str = "upper_bound_resize",
+    ) -> dict[str, np.ndarray | None]:
+        """
+        NumPy Pre-processing.
+        Outputs a dictionary of NumPy arrays ready for model inference.
+        """
+        # 1. Base processing (Returns NumPy arrays due to our previous changes)
+        imgs_cpu, exts, ixts = self._preprocess_inputs(
+            image, extrinsics, intrinsics, process_res, process_res_method
+        )
+
+        # 2. Prepare inputs (Adds batch dimension in NumPy)
+        imgs, ex_t, in_t = self._prepare_model_inputs(imgs_cpu, exts, ixts)
+
+        # 3. Normalize extrinsics (Uses NumPy affine_inverse_np)
+        ex_t_norm = self._normalize_extrinsics(ex_t.copy() if ex_t is not None else None)
+
+        return {
+            "imgs": imgs,
+            "ex_t_norm": ex_t_norm,
+            "in_t": in_t,
+            "imgs_cpu": imgs_cpu,  # Preserved for post-processing visualization
+            "original_extrinsics": extrinsics,
+            "original_intrinsics": intrinsics
+        }
+    
+    def infer_pytorch(
+        self,
+        input: dict[str, np.ndarray | None],
+        export_feat_layers: Sequence[int] | None = None,
+        infer_gs: bool = False,
+        use_ray_pose: bool = False,
+        ref_view_strategy: str = "saddle_balanced",
+    ) -> dict[str, np.ndarray]:
+        """
+        PyTorch Inference Boundary.
+        Takes NumPy arrays, converts to PyTorch tensors, runs the PyTorch model and converts outputs immediately back to NumPy arrays.
+        """
+        device = self._get_model_device()
+
+        # Convert NumPy inputs to PyTorch tensors and move to device
+        imgs_t = torch.from_numpy(input["imgs"]).to(device)
+        
+        ex_t_norm_t = (
+            torch.from_numpy(input["ex_t_norm"]).to(device) 
+            if input["ex_t_norm"] is not None else None
+        )
+        
+        in_t_t = (
+            torch.from_numpy(input["in_t"]).to(device) 
+            if input["in_t"] is not None else None
+        )
+
+        # Run the PyTorch model
+        feat_layers = list(export_feat_layers) if export_feat_layers is not None else []
+        
+        raw_output = self._run_model_forward(
+            imgs_t, ex_t_norm_t, in_t_t, feat_layers, infer_gs, use_ray_pose, ref_view_strategy
+        )
+
+        # Convert PyTorch outputs back to NumPy instantly at the boundary
+        output_dict = {}
+        for key, value in raw_output.items():
+            if isinstance(value, torch.Tensor):
+                # Detach from graph, move to CPU, and convert to NumPy
+                output_dict[key] = value.detach().cpu().numpy()
+            else:
+                output_dict[key] = value
+
+        return output_dict
+    
+    def postprocess(
+        self, 
+        np_outputs: dict[str, np.ndarray], 
+        np_inputs: dict[str, np.ndarray], 
+        align_to_input_ext_scale: bool = True
+    ) -> Prediction:
+        """
+        NumPy Post-processing.
+        Takes NumPy outputs from inference and formats them into the Prediction object.
+        """
+        # Convert raw NumPy outputs to Prediction object
+        prediction = self._convert_to_prediction(np_outputs)
+
+        # Align prediction to extrinsics (NumPy math)
+        prediction = self._align_to_input_extrinsics_intrinsics(
+            np_inputs["original_extrinsics"], 
+            np_inputs["original_intrinsics"], 
+            prediction, 
+            align_to_input_ext_scale
+        )
+
+        # Add processed images for visualization (NumPy transpositions)
+        prediction = self._add_processed_images(prediction, np_inputs["imgs_cpu"])
+
+        return prediction
+
     def inference(
         self,
         image: list[np.ndarray | Image.Image | str],
@@ -193,33 +296,13 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
             assert isinstance(image[0], str), "`image` must be image paths for COLMAP export."
 
         # Preprocess images
-        imgs_cpu, extrinsics, intrinsics = self._preprocess_inputs(
-            image, extrinsics, intrinsics, process_res, process_res_method
-        )
-
-        # Prepare tensors for model
-        imgs, ex_t, in_t = self._prepare_model_inputs(imgs_cpu, extrinsics, intrinsics)
-
-        # Normalize extrinsics
-        ex_t_norm = self._normalize_extrinsics(ex_t.clone() if ex_t is not None else None)
+        input_dict = self.preprocess(image, extrinsics, intrinsics, process_res, process_res_method)
 
         # Run model forward pass
-        export_feat_layers = list(export_feat_layers) if export_feat_layers is not None else []
-
-        raw_output = self._run_model_forward(
-            imgs, ex_t_norm, in_t, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
-        )
+        output_dict = self.infer_pytorch(input_dict, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy)
 
         # Convert raw output to prediction
-        prediction = self._convert_to_prediction(raw_output)
-
-        # Align prediction to extrinsincs
-        prediction = self._align_to_input_extrinsics_intrinsics(
-            extrinsics, intrinsics, prediction, align_to_input_ext_scale
-        )
-
-        # Add processed images for visualization
-        prediction = self._add_processed_images(prediction, imgs_cpu)
+        prediction = self.postprocess(output_dict, input_dict, align_to_input_ext_scale)
 
         # Export if requested
         if export_dir is not None:
@@ -279,7 +362,7 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         intrinsics: np.ndarray | None = None,
         process_res: int = 504,
         process_res_method: str = "upper_bound_resize",
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
         """Preprocess input images using input processor."""
         start_time = time.time()
         imgs_cpu, extrinsics, intrinsics = self.input_processor(
@@ -300,41 +383,31 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
 
     def _prepare_model_inputs(
         self,
-        imgs_cpu: torch.Tensor,
-        extrinsics: torch.Tensor | None,
-        intrinsics: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        imgs_cpu: np.ndarray,
+        extrinsics: np.ndarray | None,
+        intrinsics: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
         """Prepare tensors for model input."""
-        device = self._get_model_device()
 
-        # Move images to model device
-        imgs = imgs_cpu.to(device, non_blocking=True)[None].float()
+        # Add batch dimension
+        imgs = np.expand_dims(imgs_cpu, axis=0).astype(np.float32)  # (N, 3, H, W) -> (1, N, 3, H, W)
 
-        # Convert camera parameters to tensors
-        ex_t = (
-            extrinsics.to(device, non_blocking=True)[None].float()
-            if extrinsics is not None
-            else None
-        )
-        in_t = (
-            intrinsics.to(device, non_blocking=True)[None].float()
-            if intrinsics is not None
-            else None
-        )
+        ex_t = np.expand_dims(extrinsics, axis=0).astype(np.float32) if extrinsics is not None else None
+        in_t = np.expand_dims(intrinsics, axis=0).astype(np.float32) if intrinsics is not None else None
 
         return imgs, ex_t, in_t
 
-    def _normalize_extrinsics(self, ex_t: torch.Tensor | None) -> torch.Tensor | None:
+    def _normalize_extrinsics(self, ex_t: np.ndarray | None) -> np.ndarray | None:
         """Normalize extrinsics"""
         if ex_t is None:
             return None
-        transform = affine_inverse(ex_t[:, :1])
+        transform = affine_inverse_np(ex_t[:, :1])
         ex_t_norm = ex_t @ transform
-        c2ws = affine_inverse(ex_t_norm)
+        c2ws = affine_inverse_np(ex_t_norm)
         translations = c2ws[..., :3, 3]
-        dists = translations.norm(dim=-1)
-        median_dist = torch.median(dists)
-        median_dist = torch.clamp(median_dist, min=1e-1)
+        dists = np.linalg.norm(translations, axis=-1)
+        median_dist = np.median(dists)
+        median_dist = np.clip(median_dist, min=1e-1, a_max=None)
         ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / median_dist
         return ex_t_norm
 
@@ -396,10 +469,10 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         logger.info(f"Conversion to Prediction Done. Time: {end_time - start_time} seconds")
         return output
 
-    def _add_processed_images(self, prediction: Prediction, imgs_cpu: torch.Tensor) -> Prediction:
+    def _add_processed_images(self, prediction: Prediction, imgs_cpu: np.ndarray) -> Prediction:
         """Add processed images to prediction for visualization."""
         # Convert from (N, 3, H, W) to (N, H, W, 3) and denormalize
-        processed_imgs = imgs_cpu.permute(0, 2, 3, 1).cpu().numpy()  # (N, H, W, 3)
+        processed_imgs = np.transpose(imgs_cpu, (0, 2, 3, 1))  # (N, H, W, 3)
 
         # Denormalize from ImageNet normalization
         mean = np.array([0.485, 0.456, 0.406])

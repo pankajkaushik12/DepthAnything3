@@ -24,8 +24,6 @@ from __future__ import annotations
 from typing import Sequence
 import cv2
 import numpy as np
-import torch
-import torchvision.transforms as T
 from PIL import Image
 
 from depth_anything_3.utils.logger import logger
@@ -52,8 +50,7 @@ class InputProcessor:
       - Each image is processed independently in a worker.
       - Order of outputs matches the input order.
     """
-
-    NORMALIZE = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    
     PATCH_SIZE = 14
 
     def __init__(self):
@@ -74,7 +71,7 @@ class InputProcessor:
         print_progress: bool = False,
         sequential: bool | None = None,
         desc: str | None = "Preprocess",
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
         """
         Returns:
             (tensor, extrinsics_list, intrinsics_list)
@@ -100,12 +97,12 @@ class InputProcessor:
 
         batch_tensor = self._stack_batch(proc_imgs)
         out_exts = (
-            torch.from_numpy(np.asarray(out_exts)).float()
+            np.asarray(out_exts)
             if out_exts is not None and out_exts[0] is not None
             else None
         )
         out_ixts = (
-            torch.from_numpy(np.asarray(out_ixts)).float()
+            np.asarray(out_ixts)
             if out_ixts is not None and out_ixts[0] is not None
             else None
         )
@@ -179,10 +176,10 @@ class InputProcessor:
 
     def _unify_batch_shapes(
         self,
-        processed_images: list[torch.Tensor],
+        processed_images: list[np.ndarray],
         out_sizes: list[tuple[int, int]],
         out_intrinsics: list[np.ndarray | None],
-    ) -> tuple[list[torch.Tensor], list[tuple[int, int]], list[np.ndarray | None]]:
+    ) -> tuple[list[np.ndarray], list[tuple[int, int]], list[np.ndarray | None]]:
         """Center-crop all tensors to the smallest H, W; adjust intrinsics' cx, cy accordingly."""
         if len(set(out_sizes)) <= 1:
             return processed_images, out_sizes, out_intrinsics
@@ -194,12 +191,12 @@ class InputProcessor:
             f"center-cropping all to smallest ({min_h},{min_w})"
         )
 
-        center_crop = T.CenterCrop((min_h, min_w))
+        # center_crop = T.CenterCrop((min_h, min_w))
         new_imgs, new_sizes, new_ixts = [], [], []
-        for img_t, (H, W), K in zip(processed_images, out_sizes, out_intrinsics):
+        for img_np, (H, W), K in zip(processed_images, out_sizes, out_intrinsics):
             crop_top = max(0, (H - min_h) // 2)
             crop_left = max(0, (W - min_w) // 2)
-            new_imgs.append(center_crop(img_t))
+            new_imgs.append(img_np[:, crop_top : crop_top + min_h, crop_left : crop_left + min_w])
             new_sizes.append((min_h, min_w))
             if K is None:
                 new_ixts.append(None)
@@ -210,8 +207,8 @@ class InputProcessor:
                 new_ixts.append(K_adj)
         return new_imgs, new_sizes, new_ixts
 
-    def _stack_batch(self, processed_images: list[torch.Tensor]) -> torch.Tensor:
-        return torch.stack(processed_images)
+    def _stack_batch(self, processed_images: list[np.ndarray]) -> np.ndarray:
+        return np.stack(processed_images)
 
     # -----------------------------
     # Per-item worker
@@ -224,7 +221,7 @@ class InputProcessor:
         *,
         process_res: int,
         process_res_method: str,
-    ) -> tuple[torch.Tensor, tuple[int, int], np.ndarray | None, np.ndarray | None]:
+    ) -> tuple[np.ndarray, tuple[int, int], np.ndarray | None, np.ndarray | None]:
         # Load & remember original size
         pil_img = self._load_image(img)
         orig_w, orig_h = pil_img.size
@@ -306,9 +303,18 @@ class InputProcessor:
         else:
             raise ValueError(f"Unsupported image type: {type(img)}")
 
-    def _normalize_image(self, img: Image.Image) -> torch.Tensor:
-        img_tensor = T.ToTensor()(img)
-        return self.NORMALIZE(img_tensor)
+    def _normalize_image(self, img: Image.Image) -> np.ndarray:
+        # Convert PIL Image to float32 NumPy array and scale to [0, 1]
+        img_np = np.array(img, dtype=np.float32) / 255.0
+        
+        # Transpose from (H, W, C) to (C, H, W)
+        img_np = np.transpose(img_np, (2, 0, 1))
+        
+        # Apply ImageNet normalization
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+
+        return (img_np - mean) / std
 
     # -----------------------------
     # Boundary resizing
@@ -407,12 +413,12 @@ if __name__ == "__main__":
 
     def show_result(
         tag: str,
-        tensor: torch.Tensor,
+        arr: np.ndarray,
         Ks_in: Sequence[np.ndarray | None] | None = None,
         Ks_out: Sequence[np.ndarray | None] | None = None,
     ):
-        B, N, C, H, W = tensor.shape
-        print(f"[{tag}] shape={tuple(tensor.shape)}  HxW=({H},{W})  div14=({H%14==0},{W%14==0})")
+        B, N, C, H, W = arr.shape
+        print(f"[{tag}] shape={tuple(arr.shape)}  HxW=({H},{W})  div14=({H%14==0},{W%14==0})")
         assert H % 14 == 0 and W % 14 == 0, f"{tag}: output size not divisible by 14!"
         if Ks_in is not None or Ks_out is not None:
             Ks_in = Ks_in or [None] * N

@@ -58,6 +58,21 @@ def affine_inverse(A: torch.Tensor):
     P = A[..., 3:, :]  # ..., 1, 4
     return torch.cat([torch.cat([R.mT, -R.mT @ T], dim=-1), P], dim=-2)
 
+def affine_inverse_np(A: np.ndarray) -> np.ndarray:
+    """NumPy equivalent of the PyTorch affine_inverse function."""
+    R = A[..., :3, :3]  # ..., 3, 3
+    T = A[..., :3, 3:]  # ..., 3, 1
+    P = A[..., 3:, :]   # ..., 1, 4
+    
+    # R.mT in PyTorch transposes the last two dimensions
+    R_T = R.swapaxes(-1, -2)
+    
+    # torch.cat(..., dim=-1) becomes np.concatenate(..., axis=-1)
+    top_row = np.concatenate([R_T, -(R_T @ T)], axis=-1)
+    
+    # torch.cat(..., dim=-2) becomes np.concatenate(..., axis=-2)
+    return np.concatenate([top_row, P], axis=-2)
+
 
 def transpose_last_two_axes(arr):
     """
