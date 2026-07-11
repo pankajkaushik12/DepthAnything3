@@ -50,16 +50,12 @@ def select_reference_view(
     """
     B, S, N, C = x.shape
     
-    # For single view, no reordering needed
-    if S <= 1:
-        return torch.zeros(B, dtype=torch.long, device=x.device)
-    
     # Simple position-based strategies
     if strategy == "first":
         return torch.zeros(B, dtype=torch.long, device=x.device)
     
     elif strategy == "middle":
-        return torch.full((B,), S // 2, dtype=torch.long, device=x.device)
+        return torch.full((B,), x.shape[1] // 2, dtype=torch.long, device=x.device)
     
     # Feature-based strategies require normalized class tokens
     # Extract and normalize class tokens (first token of each view)
@@ -70,7 +66,11 @@ def select_reference_view(
         # Compute similarity matrix
         sim = torch.matmul(img_class_feat, img_class_feat.transpose(1, 2))  # B S S
         sim_no_diag = sim - torch.eye(S, device=sim.device).unsqueeze(0)
-        sim_score = sim_no_diag.sum(dim=-1) / (S - 1)  # B S
+
+        S_tensor = torch.tensor(x.shape[1], dtype=torch.float32, device=x.device)
+        denom = torch.clamp(S_tensor - 1.0, min=1.0)
+
+        sim_score = sim_no_diag.sum(dim=-1) / denom  # B S
         
         feat_norm = x[:, :, 0].norm(dim=-1)  # B S
         feat_var = img_class_feat.var(dim=-1)  # B S
@@ -132,10 +132,6 @@ def reorder_by_reference(
     """
     B, S = x.shape[0], x.shape[1]
     
-    # For single view, no reordering needed
-    if S <= 1:
-        return x
-    
     # Create position indices: (B, S) where each row is [0, 1, 2, ..., S-1]
     positions = torch.arange(S, device=x.device).unsqueeze(0).expand(B, -1)  # B S
     
@@ -156,7 +152,7 @@ def reorder_by_reference(
         positions
     )
     # Set position 0 to ref_idx
-    reorder_indices[:, 0] = b_idx
+    reorder_indices = torch.where(positions == 0, b_idx_expanded, reorder_indices)
     
     # Gather using advanced indexing
     batch_indices = torch.arange(B, device=x.device).unsqueeze(1)  # B 1
@@ -186,10 +182,6 @@ def restore_original_order(
     """
     B, S = x.shape[0], x.shape[1]
     
-    # For single view, no restoration needed
-    if S <= 1:
-        return x
-    
     # Create target position indices: (B, S) where each row is [0, 1, 2, ..., S-1]
     target_positions = torch.arange(S, device=x.device).unsqueeze(0).expand(B, -1)  # B S
     
@@ -208,11 +200,10 @@ def restore_original_order(
     )
     # Target position = ref_idx comes from current position 0
     # Use scatter to set specific positions
-    restore_indices = torch.scatter(
-        restore_indices,
-        dim=1,
-        index=b_idx_expanded,
-        src=torch.zeros_like(b_idx_expanded)
+    restore_indices = torch.where(
+        target_positions == b_idx_expanded,
+        torch.zeros_like(target_positions),
+        restore_indices
     )
     
     # Gather using advanced indexing
