@@ -100,9 +100,9 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
     def forward(
         self,
         image: torch.Tensor,
-        extrinsics: torch.Tensor | None = None,
-        intrinsics: torch.Tensor | None = None,
-        export_feat_layers: list[int] | None = None,
+        extrinsics: torch.Tensor,
+        intrinsics: torch.Tensor,
+        export_feat_layers: list[int] = [],
         infer_gs: bool = False,
         use_ray_pose: bool = False,
         ref_view_strategy: str = "saddle_balanced",
@@ -176,24 +176,23 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         """
         device = self._get_model_device()
 
+        # Determine Batch and Num Views from the image tensor
+        B = input["imgs"].shape[0]
+        N = input["imgs"].shape[1]
+
+        if input["ex_t_norm"] is None:
+            input["ex_t_norm"] = np.full((B, N, 4, 4), -1.0, dtype=np.float32)
+            
+        if input["in_t"] is None:
+            input["in_t"] = np.full((B, N, 3, 3), -1.0, dtype=np.float32)
+
         # Convert NumPy inputs to PyTorch tensors and move to device
         imgs_t = torch.from_numpy(input["imgs"]).to(device)
-        
-        ex_t_norm_t = (
-            torch.from_numpy(input["ex_t_norm"]).to(device) 
-            if input["ex_t_norm"] is not None else None
-        )
-        
-        in_t_t = (
-            torch.from_numpy(input["in_t"]).to(device) 
-            if input["in_t"] is not None else None
-        )
-
-        # Run the PyTorch model
-        feat_layers = list(export_feat_layers) if export_feat_layers is not None else []
+        ex_t_norm_t = torch.from_numpy(input["ex_t_norm"]).to(device)
+        in_t_t = torch.from_numpy(input["in_t"]).to(device)
         
         raw_output = self._run_model_forward(
-            imgs_t, ex_t_norm_t, in_t_t, feat_layers, infer_gs, use_ray_pose, ref_view_strategy
+            imgs_t, ex_t_norm_t, in_t_t, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
         )
 
         # Convert PyTorch outputs back to NumPy instantly at the boundary
