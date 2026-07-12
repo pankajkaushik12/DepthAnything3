@@ -50,14 +50,11 @@ class PositionGetter:
             Tensor of shape (batch_size, height*width, 2) containing y,x coordinates
             for each position in the grid, repeated for each batch item.
         """
-        if (height, width) not in self.position_cache:
-            y_coords = torch.arange(height, device=device)
-            x_coords = torch.arange(width, device=device)
-            positions = torch.cartesian_prod(y_coords, x_coords)
-            self.position_cache[height, width] = positions
+        y_coords = torch.arange(height, device=device)
+        x_coords = torch.arange(width, device=device)
+        positions = torch.cartesian_prod(y_coords, x_coords)
 
-        cached_positions = self.position_cache[height, width]
-        return cached_positions.view(1, height * width, 2).expand(batch_size, -1, -1).clone()
+        return positions.view(1, height * width, 2).expand(batch_size, -1, -1).clone()
 
 
 class RotaryPositionEmbedding2D(nn.Module):
@@ -82,7 +79,6 @@ class RotaryPositionEmbedding2D(nn.Module):
         super().__init__()
         self.base_frequency = frequency
         self.scaling_factor = scaling_factor
-        self.frequency_cache: Dict[Tuple, Tuple[torch.Tensor, torch.Tensor]] = {}
 
     def _compute_frequency_components(
         self, dim: int, seq_len: int, device: torch.device, dtype: torch.dtype
@@ -98,24 +94,21 @@ class RotaryPositionEmbedding2D(nn.Module):
         Returns:
             Tuple of (cosine, sine) tensors for frequency components.
         """
-        cache_key = (dim, seq_len, device, dtype)
-        if cache_key not in self.frequency_cache:
-            # Compute frequency bands
-            exponents = torch.arange(0, dim, 2, device=device).float() / dim
-            inv_freq = 1.0 / (self.base_frequency**exponents)
+        # Compute frequency bands
+        exponents = torch.arange(0, dim, 2, device=device).float() / dim
+        inv_freq = 1.0 / (self.base_frequency**exponents)
 
-            # Generate position-dependent frequencies
-            positions = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
-            angles = torch.einsum("i,j->ij", positions, inv_freq)
+        # Generate position-dependent frequencies
+        positions = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
+        angles = torch.einsum("i,j->ij", positions, inv_freq)
 
-            # Compute and cache frequency components
-            angles = angles.to(dtype)
-            angles = torch.cat((angles, angles), dim=-1)
-            cos_components = angles.cos().to(dtype)
-            sin_components = angles.sin().to(dtype)
-            self.frequency_cache[cache_key] = (cos_components, sin_components)
+        # Compute and cache frequency components
+        angles = angles.to(dtype)
+        angles = torch.cat((angles, angles), dim=-1)
+        cos_components = angles.cos().to(dtype)
+        sin_components = angles.sin().to(dtype)
 
-        return self.frequency_cache[cache_key]
+        return cos_components, sin_components
 
     @staticmethod
     def _rotate_features(x: torch.Tensor) -> torch.Tensor:
@@ -179,10 +172,15 @@ class RotaryPositionEmbedding2D(nn.Module):
         # Compute feature dimension for each spatial direction
         feature_dim = tokens.size(-1) // 2
 
+        # ONNX FIX: Instead of dynamically calculating max_position using data-dependent .max(),
+        # we provide a statically large max_seq_len. 
+        # A value of 4096 easily covers a grid up to 4096x4096 patches.
+        # F.embedding will safely slice out only the indices it needs based on the `positions` tensor.
+        SAFE_MAX_SEQ_LEN = 4096
+
         # Get frequency components
-        max_position = int(positions.max()) + 1
         cos_comp, sin_comp = self._compute_frequency_components(
-            feature_dim, max_position, tokens.device, tokens.dtype
+            feature_dim, SAFE_MAX_SEQ_LEN, tokens.device, tokens.dtype
         )
 
         # Split features for vertical and horizontal processing
