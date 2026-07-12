@@ -313,7 +313,13 @@ class DualDPT(nn.Module):
     def _add_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """Simple UV positional embedding added to feature maps."""
         pw, ph = x.shape[-1], x.shape[-2]
-        pe = create_uv_grid(pw, ph, aspect_ratio=W / H, dtype=x.dtype, device=x.device)
+
+        # Convert W and H to float tensors before division to dodge the `int_truediv` SymPy crash on symbolic proxies.
+        W_t = torch.tensor(W, dtype=torch.float32, device=x.device)
+        H_t = torch.tensor(H, dtype=torch.float32, device=x.device)
+        aspect_ratio = W_t / H_t
+
+        pe = create_uv_grid(pw, ph, aspect_ratio=aspect_ratio, dtype=x.dtype, device=x.device)
         pe = position_grid_to_embed(pe, x.shape[1]) * ratio
         pe = pe.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
         return x + pe
