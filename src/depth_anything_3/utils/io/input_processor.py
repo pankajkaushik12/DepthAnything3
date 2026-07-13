@@ -19,15 +19,82 @@ This version removes the square center-crop step for "*crop" methods (same as yo
 In addition, it parallelizes per-image preprocessing using the provided `parallel_execution`.
 """
 
-from __future__ import annotations
-
-from typing import Sequence
 import cv2
 import numpy as np
-from PIL import Image
 
-from depth_anything_3.utils.logger import logger
-from depth_anything_3.utils.parallel_utils import parallel_execution
+from multiprocessing.pool import ThreadPool
+from typing import Callable, Dict, List
+
+def parallel_execution(
+    *args,
+    action: Callable,
+    num_processes=32,
+    print_progress=False,
+    sequential=False,
+    async_return=False,
+    desc=None,
+    **kwargs,
+):
+    # Partially copy from EasyVolumetricVideo (parallel_execution)
+    # NOTE: we expect first arg / or kwargs to be distributed
+    # NOTE: print_progress arg is reserved.
+    # `*args` packs all positional arguments passed to the function into a tuple
+    args = list(args)
+
+    def get_length(args: List, kwargs: Dict):
+        for a in args:
+            if isinstance(a, list):
+                return len(a)
+        for v in kwargs.values():
+            if isinstance(v, list):
+                return len(v)
+        raise NotImplementedError
+
+    def get_action_args(length: int, args: List, kwargs: Dict, i: int):
+        action_args = [
+            (arg[i] if isinstance(arg, list) and len(arg) == length else arg) for arg in args
+        ]
+        # TODO: Support all types of iterable
+        action_kwargs = {
+            key: (
+                kwargs[key][i]
+                if isinstance(kwargs[key], list) and len(kwargs[key]) == length
+                else kwargs[key]
+            )
+            for key in kwargs
+        }
+        return action_args, action_kwargs
+
+    if not sequential:
+        # Create ThreadPool
+        pool = ThreadPool(processes=num_processes)
+
+        # Spawn threads
+        results = []
+        asyncs = []
+        length = get_length(args, kwargs)
+        for i in range(length):
+            action_args, action_kwargs = get_action_args(length, args, kwargs, i)
+            async_result = pool.apply_async(action, action_args, action_kwargs)
+            asyncs.append(async_result)
+
+        # Join threads and get return values
+        if not async_return:
+            for async_result in asyncs:
+                results.append(async_result.get())  # will sync the corresponding thread
+            pool.close()
+            pool.join()
+            return results
+        else:
+            return pool
+    else:
+        results = []
+        length = get_length(args, kwargs)
+        for i in range(length):
+            action_args, action_kwargs = get_action_args(length, args, kwargs, i)
+            async_result = action(*action_args, **action_kwargs)
+            results.append(async_result)
+        return results
 
 
 class InputProcessor:
@@ -61,7 +128,7 @@ class InputProcessor:
     # -----------------------------
     def __call__(
         self,
-        image: list[np.ndarray | Image.Image | str],
+        image: list[np.ndarray | str],
         extrinsics: np.ndarray | None = None,
         intrinsics: np.ndarray | None = None,
         process_res: int = 504,
@@ -116,7 +183,7 @@ class InputProcessor:
 
     def _validate_and_pack_meta(
         self,
-        images: list[np.ndarray | Image.Image | str],
+        images: list[np.ndarray | str],
         extrinsics: np.ndarray | None,
         intrinsics: np.ndarray | None,
     ) -> tuple[list[np.ndarray | None] | None, list[np.ndarray | None] | None]:
@@ -131,7 +198,7 @@ class InputProcessor:
     def _run_parallel(
         self,
         *,
-        image: list[np.ndarray | Image.Image | str],
+        image: list[np.ndarray | str],
         exts_list: list[np.ndarray | None] | None,
         ixts_list: list[np.ndarray | None] | None,
         process_res: int,
@@ -186,10 +253,6 @@ class InputProcessor:
 
         min_h = min(h for h, _ in out_sizes)
         min_w = min(w for _, w in out_sizes)
-        logger.warn(
-            f"Images in batch have different sizes {out_sizes}; "
-            f"center-cropping all to smallest ({min_h},{min_w})"
-        )
 
         # center_crop = T.CenterCrop((min_h, min_w))
         new_imgs, new_sizes, new_ixts = [], [], []
@@ -215,7 +278,7 @@ class InputProcessor:
     # -----------------------------
     def _process_one(
         self,
-        img: np.ndarray | Image.Image | str,
+        img: np.ndarray | str,
         extrinsic: np.ndarray | None = None,
         intrinsic: np.ndarray | None = None,
         *,
@@ -223,32 +286,32 @@ class InputProcessor:
         process_res_method: str,
     ) -> tuple[np.ndarray, tuple[int, int], np.ndarray | None, np.ndarray | None]:
         # Load & remember original size
-        pil_img = self._load_image(img)
-        orig_w, orig_h = pil_img.size
+        img = self._load_image(img)
+        orig_h, orig_w = img.shape[:2]
 
         # Boundary resize
-        pil_img = self._resize_image(pil_img, process_res, process_res_method)
-        w, h = pil_img.size
+        img = self._resize_image(img, process_res, process_res_method)
+        h, w = img.shape[:2]
         intrinsic = self._resize_ixt(intrinsic, orig_w, orig_h, w, h)
 
         # Enforce divisibility by PATCH_SIZE
         if process_res_method.endswith("resize"):
-            pil_img = self._make_divisible_by_resize(pil_img, self.PATCH_SIZE)
-            new_w, new_h = pil_img.size
+            img = self._make_divisible_by_resize(img, self.PATCH_SIZE)
+            new_h, new_w = img.shape[:2]
             intrinsic = self._resize_ixt(intrinsic, w, h, new_w, new_h)
             w, h = new_w, new_h
         elif process_res_method.endswith("crop"):
-            pil_img = self._make_divisible_by_crop(pil_img, self.PATCH_SIZE)
-            new_w, new_h = pil_img.size
+            img = self._make_divisible_by_crop(img, self.PATCH_SIZE)
+            new_h, new_w = img.shape[:2]
             intrinsic = self._crop_ixt(intrinsic, w, h, new_w, new_h)
             w, h = new_w, new_h
         else:
             raise ValueError(f"Unsupported process_res_method: {process_res_method}")
 
         # Convert to tensor & normalize
-        img_tensor = self._normalize_image(pil_img)
+        img_tensor = self._normalize_image(img)
         _, H, W = img_tensor.shape
-        assert (W, H) == (w, h), "Tensor size mismatch with PIL image size after processing."
+        assert (W, H) == (w, h), "Tensor size mismatch with image size after processing."
 
         # Return: (img_tensor, (H, W), intrinsic, extrinsic)
         return img_tensor, (H, W), intrinsic, extrinsic
@@ -292,20 +355,21 @@ class InputProcessor:
     # -----------------------------
     # I/O & normalization
     # -----------------------------
-    def _load_image(self, img: np.ndarray | Image.Image | str) -> Image.Image:
+    def _load_image(self, img: np.ndarray | str) -> np.ndarray:
         if isinstance(img, str):
-            return Image.open(img).convert("RGB")
+            img = cv2.imread(img)
+            if img is None:
+                raise ValueError(f"Failed to read image: {img}")
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         elif isinstance(img, np.ndarray):
             # Assume HxWxC uint8/RGB
-            return Image.fromarray(img).convert("RGB")
-        elif isinstance(img, Image.Image):
-            return img.convert("RGB")
+            return img
         else:
             raise ValueError(f"Unsupported image type: {type(img)}")
 
-    def _normalize_image(self, img: Image.Image) -> np.ndarray:
-        # Convert PIL Image to float32 NumPy array and scale to [0, 1]
-        img_np = np.array(img, dtype=np.float32) / 255.0
+    def _normalize_image(self, img: np.ndarray) -> np.ndarray:
+        # Convert Image to float32 array and scale to [0, 1]
+        img_np = img.astype(np.float32) / 255.0
         
         # Transpose from (H, W, C) to (C, H, W)
         img_np = np.transpose(img_np, (2, 0, 1))
@@ -319,7 +383,7 @@ class InputProcessor:
     # -----------------------------
     # Boundary resizing
     # -----------------------------
-    def _resize_image(self, img: Image.Image, target_size: int, method: str) -> Image.Image:
+    def _resize_image(self, img: np.ndarray, target_size: int, method: str) -> np.ndarray:
         if method in ("upper_bound_resize", "upper_bound_crop"):
             return self._resize_longest_side(img, target_size)
         elif method in ("lower_bound_resize", "lower_bound_crop"):
@@ -327,8 +391,8 @@ class InputProcessor:
         else:
             raise ValueError(f"Unsupported resize method: {method}")
 
-    def _resize_longest_side(self, img: Image.Image, target_size: int) -> Image.Image:
-        w, h = img.size
+    def _resize_longest_side(self, img: np.ndarray, target_size: int) -> np.ndarray:
+        h, w = img.shape[:2]
         longest = max(w, h)
         if longest == target_size:
             return img
@@ -336,11 +400,10 @@ class InputProcessor:
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
         interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
-        arr = cv2.resize(np.asarray(img), (new_w, new_h), interpolation=interpolation)
-        return Image.fromarray(arr)
+        return cv2.resize(img, (new_w, new_h), interpolation=interpolation)
 
-    def _resize_shortest_side(self, img: Image.Image, target_size: int) -> Image.Image:
-        w, h = img.size
+    def _resize_shortest_side(self, img: np.ndarray, target_size: int) -> np.ndarray:
+        h, w = img.shape[:2]
         shortest = min(w, h)
         if shortest == target_size:
             return img
@@ -348,31 +411,30 @@ class InputProcessor:
         new_w = max(1, int(round(w * scale)))
         new_h = max(1, int(round(h * scale)))
         interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
-        arr = cv2.resize(np.asarray(img), (new_w, new_h), interpolation=interpolation)
-        return Image.fromarray(arr)
+        return cv2.resize(img, (new_w, new_h), interpolation=interpolation)
 
     # -----------------------------
     # Make divisible by PATCH_SIZE
     # -----------------------------
-    def _make_divisible_by_crop(self, img: Image.Image, patch: int) -> Image.Image:
+    def _make_divisible_by_crop(self, img: np.ndarray, patch: int) -> np.ndarray:
         """
         Floor each dimension to the nearest multiple of PATCH_SIZE via center crop.
         Example: 504x377 -> 504x364
         """
-        w, h = img.size
+        h, w = img.shape[:2]
         new_w = (w // patch) * patch
         new_h = (h // patch) * patch
         if new_w == w and new_h == h:
             return img
         left = (w - new_w) // 2
         top = (h - new_h) // 2
-        return img.crop((left, top, left + new_w, top + new_h))
+        return img[top: top + new_h, left: left + new_w]
 
-    def _make_divisible_by_resize(self, img: Image.Image, patch: int) -> Image.Image:
+    def _make_divisible_by_resize(self, img: np.ndarray, patch: int) -> np.ndarray:
         """
         Round each dimension to nearest multiple of PATCH_SIZE via small resize.
         """
-        w, h = img.size
+        h, w = img.shape[:2]
 
         def nearest_multiple(x: int, p: int) -> int:
             down = (x // p) * p
@@ -385,123 +447,9 @@ class InputProcessor:
             return img
         upscale = (new_w > w) or (new_h > h)
         interpolation = cv2.INTER_CUBIC if upscale else cv2.INTER_AREA
-        arr = cv2.resize(np.asarray(img), (new_w, new_h), interpolation=interpolation)
-        return Image.fromarray(arr)
+        return cv2.resize(img, (new_w, new_h), interpolation=interpolation)
 
 
 # Backward compatibility alias
 InputAdapter = InputProcessor
 
-
-# ===========================
-# Minimal test runner (parallel execution)
-# ===========================
-if __name__ == "__main__":
-    """
-    Minimal test suite:
-      - Creates pairs of images so batch shapes match.
-      - Tests all four process_res_methods.
-      - Prints fx fy cx cy IN->OUT per image.
-      - Includes cases with K/E provided and with None.
-    """
-
-    def fmt_k_line(K: np.ndarray | None) -> str:
-        if K is None:
-            return "None"
-        fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
-        return f"fx={fx:.3f} fy={fy:.3f} cx={cx:.3f} cy={cy:.3f}"
-
-    def show_result(
-        tag: str,
-        arr: np.ndarray,
-        Ks_in: Sequence[np.ndarray | None] | None = None,
-        Ks_out: Sequence[np.ndarray | None] | None = None,
-    ):
-        B, N, C, H, W = arr.shape
-        print(f"[{tag}] shape={tuple(arr.shape)}  HxW=({H},{W})  div14=({H%14==0},{W%14==0})")
-        assert H % 14 == 0 and W % 14 == 0, f"{tag}: output size not divisible by 14!"
-        if Ks_in is not None or Ks_out is not None:
-            Ks_in = Ks_in or [None] * N
-            Ks_out = Ks_out or [None] * N
-            for i in range(N):
-                print(f"  K[{i}]: {fmt_k_line(Ks_in[i])}  ->  {fmt_k_line(Ks_out[i])}")
-
-    proc = InputProcessor()
-    process_res = 504
-    methods = ["upper_bound_resize", "upper_bound_crop", "lower_bound_resize", "lower_bound_crop"]
-
-    # Example sizes (two orientations)
-    small_sizes = [(680, 1208), (1208, 680)]
-    large_sizes = [(1208, 680), (680, 1208)]
-
-    def make_K(w, h, fx=1200.0, fy=1100.0):
-        cx, cy = w / 2.0, h / 2.0
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-        return K
-
-    def run_suite(suite_name: str, sizes: list[tuple[int, int]]):
-        print(f"\n===== {suite_name} =====")
-        for w, h in sizes:
-            img = Image.new("RGB", (w, h), color=(123, 222, 100))
-            batch_imgs = [img, img]
-
-            # intrinsics / extrinsics examples
-            Ks_in = [make_K(w, h), make_K(w, h)]
-            Es_in = [np.eye(4, dtype=np.float32), np.eye(4, dtype=np.float32)]
-
-            for m in methods:
-                tensor, Es_out, Ks_out = proc(
-                    image=batch_imgs,
-                    process_res=process_res,
-                    process_res_method=m,
-                    num_workers=8,
-                    print_progress=False,
-                    intrinsics=Ks_in,  # test with non-None
-                    extrinsics=Es_in,
-                )
-                show_result(f"{suite_name} size=({w},{h}) | {m}", tensor, Ks_in, Ks_out)
-
-            # Also test None path
-            tensor2, Es_out2, Ks_out2 = proc(
-                image=batch_imgs,
-                process_res=process_res,
-                process_res_method="upper_bound_resize",
-                num_workers=8,
-                intrinsics=None,
-                extrinsics=None,
-            )
-            show_result(
-                f"{suite_name} size=({w},{h}) | upper_bound_resize | no K/E",
-                tensor2,
-                None,
-                Ks_out2,
-            )
-
-    run_suite("SMALL", small_sizes)
-    run_suite("LARGE", large_sizes)
-
-    # Extra sanity for 504x376
-    print("\n===== EXTRA sanity for 504x376 =====")
-    img_example = Image.new("RGB", (504, 376), color=(10, 20, 30))
-    Ks_in_extra = [make_K(504, 376, fx=900.0, fy=900.0), make_K(504, 376, fx=900.0, fy=900.0)]
-
-    out_r, _, Ks_out_r = proc(
-        image=[img_example, img_example],
-        process_res=504,
-        process_res_method="upper_bound_resize",
-        num_workers=8,
-        intrinsics=Ks_in_extra,
-    )
-    out_c, _, Ks_out_c = proc(
-        image=[img_example, img_example],
-        process_res=504,
-        process_res_method="upper_bound_crop",
-        num_workers=8,
-        intrinsics=Ks_in_extra,
-    )
-    _, _, _, Hr, Wr = out_r.shape
-    _, _, _, Hc, Wc = out_c.shape
-    print(f"upper_bound_resize -> ({Hr},{Wr})  (rounded to nearest multiple of 14)")
-    show_result("Ks after upper_bound_resize", out_r, Ks_in_extra, Ks_out_r)
-    print(f"upper_bound_crop   -> ({Hc},{Wc})  (floored to multiple of 14)")
-    show_result("Ks after upper_bound_crop", out_c, Ks_in_extra, Ks_out_c)
