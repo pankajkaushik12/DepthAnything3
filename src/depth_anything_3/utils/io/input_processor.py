@@ -19,7 +19,9 @@ This version removes the square center-crop step for "*crop" methods (same as yo
 In addition, it parallelizes per-image preprocessing using the provided `parallel_execution`.
 """
 
+import os
 import cv2
+from pathlib import Path
 import numpy as np
 
 from multiprocessing.pool import ThreadPool
@@ -356,16 +358,36 @@ class InputProcessor:
     # I/O & normalization
     # -----------------------------
     def _load_image(self, img: np.ndarray | str) -> np.ndarray:
-        if isinstance(img, str):
+        """Load an RGB image from a path or validate an in-memory NumPy array."""
+
+        if isinstance(img, (str, Path)):
+            img_path = str(img)
+
+            if not os.path.exists(img_path):
+                raise FileNotFoundError(f"Image path does not exist: {img_path}")
+            
             img = cv2.imread(img)
             if img is None:
                 raise ValueError(f"Failed to read image: {img}")
-            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            img =  cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         elif isinstance(img, np.ndarray):
-            # Assume HxWxC uint8/RGB
-            return img
+            if img.ndim != 3:
+                raise ValueError(
+                    f"Expected image with shape (H, W, C), got {img.shape}."
+                )
+            
+            if img.shape[2] != 3:
+                raise ValueError(
+                    f"Expected 3-channel image, got shape {img.shape}."
+                )
+            
+            if img.size == 0:
+                raise ValueError("Input image is empty.")
         else:
             raise ValueError(f"Unsupported image type: {type(img)}")
+        
+        return img
 
     def _normalize_image(self, img: np.ndarray) -> np.ndarray:
         # Convert Image to float32 array and scale to [0, 1]
