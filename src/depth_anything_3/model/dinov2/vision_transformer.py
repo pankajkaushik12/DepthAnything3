@@ -160,7 +160,7 @@ class DinoVisionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         if self.alt_start != -1:
             self.camera_token = nn.Parameter(torch.randn(1, 2, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim)) # (1, 37 * 37 + 1, embed_dim: 768)
         assert num_register_tokens >= 0
         self.register_tokens = (
             nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim))
@@ -217,16 +217,17 @@ class DinoVisionTransformer(nn.Module):
         self.norm = norm_layer(embed_dim)
 
     def interpolate_pos_encoding(self, x, w, h):
+        # x: (B * S, h*w + 1, embed_dim)
         previous_dtype = x.dtype
-        npatch = x.shape[1] - 1
-        N = self.pos_embed.shape[1] - 1
+        npatch = x.shape[1] - 1     # h*w
+        N = self.pos_embed.shape[1] - 1     # img_size / patch_size: (518 / 14 * 518 * 14) = (37 * 37) fixed
         if npatch == N and w == h:
             return self.pos_embed
         pos_embed = self.pos_embed.float()
-        class_pos_embed = pos_embed[:, 0]
-        patch_pos_embed = pos_embed[:, 1:]
+        class_pos_embed = pos_embed[:, :1]       # (1, 1, embed_dim)
+        patch_pos_embed = pos_embed[:, 1:]      # (1, 37 * 37, embed_dim)
         dim = x.shape[-1]
-        w0 = w // self.patch_size
+        w0 = w // self.patch_size       # patch_size: 14, w, h is dynamic
         h0 = h // self.patch_size
         M = int(math.sqrt(N))  # Recover the number of patches in each dimension
         assert N == M * M
@@ -240,9 +241,9 @@ class DinoVisionTransformer(nn.Module):
             antialias=self.interpolate_antialias,
             size=(h0, w0),
         )
-        assert (w0, h0) == patch_pos_embed.shape[-2:]
-        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(previous_dtype)
+        assert (h0, w0) == patch_pos_embed.shape[-2:]
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim) # (1, embed_dim, w0, h0) -> (1, w0, h0, embed_dim) -> (1, w0 * h0, embed_dim)
+        return torch.cat((class_pos_embed, patch_pos_embed), dim=1).to(previous_dtype)      # (1, w0 * h0 + 1, embed_dim)
 
     def prepare_cls_token(self, B, S):
         cls_token = self.cls_token.expand(B, S, -1)
@@ -252,11 +253,11 @@ class DinoVisionTransformer(nn.Module):
     def prepare_tokens_with_masks(self, x, masks=None, cls_token=None, **kwargs):
         B, S, nc, h, w = x.shape
         x = x.reshape(B*S, nc, h, w)
-        x = self.patch_embed(x)
+        x = self.patch_embed(x) # (B * S, nc, h, w) -> (B * S, ph*pw, embed_dim)
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-        cls_token = self.prepare_cls_token(B, S)
-        x = torch.cat((cls_token, x), dim=1)
+        cls_token = self.prepare_cls_token(B, S) # (B * S, 1, embed_dim)
+        x = torch.cat((cls_token, x), dim=1) # (B * S, ph*pw + 1, embed_dim)
         x = x + self.interpolate_pos_encoding(x, w, h)
         if self.register_tokens is not None:
             x = torch.cat(
