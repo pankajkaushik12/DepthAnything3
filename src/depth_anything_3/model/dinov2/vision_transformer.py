@@ -230,23 +230,15 @@ class DinoVisionTransformer(nn.Module):
         h0 = h // self.patch_size
         M = int(math.sqrt(N))  # Recover the number of patches in each dimension
         assert N == M * M
-        kwargs = {}
-        if self.interpolate_offset:
-            # Historical kludge: add a small number to avoid floating point error in the
-            # interpolation, see https://github.com/facebookresearch/dino/issues/8
-            # Note: still needed for backward-compatibility, the underlying operators are using
-            # both output size and scale factors
-            sx = float(w0 + self.interpolate_offset) / M
-            sy = float(h0 + self.interpolate_offset) / M
-            kwargs["scale_factor"] = (sx, sy)
-        else:
-            # Simply specify an output size instead of a scale factor
-            kwargs["size"] = (w0, h0)
+
+        # Use the dynamically computed output size instead of scale factors.
+        # During ONNX export, scale_factor is specialized to the tracing input, causing the positional embedding interpolation to be fixed to the export
+        # resolution. Specifying the output size preserves symbolic image dimensions for dynamic-resolution inference.
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2),
             mode="bicubic",
             antialias=self.interpolate_antialias,
-            **kwargs,
+            size=(h0, w0),
         )
         assert (w0, h0) == patch_pos_embed.shape[-2:]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
