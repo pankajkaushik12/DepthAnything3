@@ -1,6 +1,15 @@
 import numpy as np
+import cv2
+from dataclasses import dataclass
 
-def transpose_last_two_axes(arr):
+@dataclass
+class Prediction:
+    depth: np.ndarray  # N, H, W
+    conf: np.ndarray | None = None  # N, H, W
+    extrinsics: np.ndarray | None = None  # N, 4, 4
+    intrinsics: np.ndarray | None = None  # N, 3, 3
+
+def transpose_last_two_axes(arr: np.ndarray):
     """
     for np < 2
     """
@@ -22,3 +31,267 @@ def affine_inverse_np(A: np.ndarray):
         ],
         axis=-2,
     )
+
+def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentile=2, ret_minmax=False, ret_type=np.uint8, colormap=cv2.COLORMAP_TURBO,):
+    """
+    Visualize a depth map using an OpenCV colormap.
+
+    Args:
+        depth: Input depth map (H, W)
+        depth_min: Minimum inverse-depth value for normalization.
+        depth_max: Maximum inverse-depth value for normalization.
+        percentile: Percentile used when depth_min/max are not given.
+        ret_minmax: Whether to also return (depth_min, depth_max).
+        ret_type: np.uint8 or np.float32 / np.float64.
+        colormap: OpenCV colormap (e.g. cv2.COLORMAP_TURBO).
+
+    Returns:
+        (H, W, 3) RGB visualization.
+    """
+    depth = depth.copy()
+
+    # inverse depth (disparity)
+    valid_mask = depth > 0
+    depth[valid_mask] = 1.0 / depth[valid_mask]
+
+    if depth_min is None:
+        depth_min = (
+            np.percentile(depth[valid_mask], percentile)
+            if valid_mask.sum() > 10
+            else 0.0
+        )
+
+    if depth_max is None:
+        depth_max = (
+            np.percentile(depth[valid_mask], 100 - percentile)
+            if valid_mask.sum() > 10
+            else 0.0
+        )
+
+    if depth_min == depth_max:
+        depth_min -= 1e-6
+        depth_max += 1e-6
+
+    depth = ((depth - depth_min) / (depth_max - depth_min)).clip(0.0, 1.0)
+    depth = 1.0 - depth
+
+    if ret_type == np.uint8:
+        gray = (depth * 255).astype(np.uint8)
+        colored = cv2.applyColorMap(gray, colormap)
+        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+
+    elif ret_type in (np.float32, np.float64):
+        gray = (depth * 255).astype(np.uint8)
+        colored = cv2.applyColorMap(gray, colormap)
+        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+        colored = colored.astype(ret_type) / 255.0
+
+    else:
+        raise ValueError(f"Unsupported return type: {ret_type}")
+
+    if ret_minmax:
+        return colored, depth_min, depth_max
+
+    return colored
+
+def normalize_extrinsics(ex_t: np.ndarray | None) -> np.ndarray | None:
+    """Normalize extrinsics"""
+    if ex_t is None:
+        return None
+    
+    transform = affine_inverse_np(ex_t[:, :1])
+    ex_t_norm = ex_t @ transform
+    
+    c2ws = affine_inverse_np(ex_t_norm)
+    translations = c2ws[..., :3, 3]
+    dists = np.linalg.norm(translations, axis=-1)
+    median_dist = np.median(dists)
+    median_dist = np.clip(median_dist, min=1e-1, a_max=None)
+    
+    ex_t_norm[..., :3, 3] = ex_t_norm[..., :3, 3] / median_dist
+    
+    return ex_t_norm
+
+def _to44(ext):
+    if ext.shape[1] == 3:
+        out = np.eye(4)[None].repeat(len(ext), 0)
+        out[:, :3, :4] = ext
+        return out
+    return ext
+
+def _poses_from_ext(ext_ref: np.ndarray, ext_est: np.ndarray):
+    ext_ref = _to44(ext_ref)
+    ext_est = _to44(ext_est)
+    pose_ref = affine_inverse_np(ext_ref)
+    pose_est = affine_inverse_np(ext_est)
+    return pose_ref, pose_est
+
+def _umeyama_sim3_from_paths_evo_rep(pose_ref: np.ndarray, pose_est: np.ndarray, with_scale: bool = False) -> tuple[np.ndarray, np.ndarray, float, np.ndarray]:
+    """
+    Pure NumPy replication of evo's Umeyama alignment and PosePath3D transformation.
+    
+    Args:
+        pose_ref: (N, 4, 4) ground truth / reference SE(3) poses
+        pose_est: (N, 4, 4) estimated SE(3) poses
+        
+    Returns:
+        r (3,3): Rotation matrix
+        t (3,): Translation vector
+        s (float): Scale factor
+        pose_est_aligned (N, 4, 4): The fully aligned SE(3) poses
+    """
+    if pose_ref.shape != pose_est.shape:
+        raise ValueError("Data matrices must have the same shape")
+
+    # 1. Extract translation vectors (m=3 dimensions, n=N points)
+    # Transposing to (3, N) to perfectly match evo's data structure
+    x = pose_est[:, :3, 3].T
+    y = pose_ref[:, :3, 3].T
+    m, n = x.shape
+
+    # 2. Umeyama Algorithm (Evo exact replication)
+    mean_x = x.mean(axis=1)
+    mean_y = y.mean(axis=1)
+
+    # Variance
+    sigma_x = 1.0 / n * (np.linalg.norm(x - mean_x[:, np.newaxis]) ** 2)
+
+    # Vectorized covariance calculation (replacing evo's for-loop)
+    cov_xy = (1.0 / n) * ((y - mean_y[:, np.newaxis]) @ (x - mean_x[:, np.newaxis]).T)
+
+    u, d, v = np.linalg.svd(cov_xy)
+
+    # Check for degenerate rank
+    if np.count_nonzero(d > np.finfo(d.dtype).eps) < m - 1:
+        raise ValueError("Degenerate covariance rank, Umeyama alignment is not possible")
+
+    # Ensure RHS coordinate system (handle reflections)
+    s_mat = np.eye(m)
+    if np.linalg.det(u) * np.linalg.det(v) < 0.0:
+        s_mat[m - 1, m - 1] = -1
+
+    # Final R, t, s parameters
+    r = u.dot(s_mat).dot(v)
+    s = 1.0 / sigma_x * np.trace(np.diag(d).dot(s_mat)) if with_scale else 1.0
+    t = mean_y - s * r.dot(mean_x)
+
+    # 3. Apply transformation exactly as evo's `scale()` and `transform()` methods do
+    pose_est_aligned = pose_est.copy()
+
+    # evo left-multiplies: new_pose = T_align @ p_scaled
+    # Rotation: R_new = r @ R_old
+    pose_est_aligned[:, :3, :3] = np.matmul(r, pose_est[:, :3, :3])
+
+    # Translation: t_new = r @ (s * t_old) + t
+    t_scaled = s * pose_est[:, :3, 3]
+    pose_est_aligned[:, :3, 3] = (t_scaled @ r.T) + t
+
+    return r, t, s, pose_est_aligned
+
+def _umeyama_sim3_from_paths(pose_ref, pose_est):
+    r, t, s, pose_est_aligned = _umeyama_sim3_from_paths_evo_rep(pose_ref, pose_est, with_scale=True)
+    return r, t, s, pose_est_aligned
+
+
+def _apply_sim3_to_poses(poses, r, t, s):
+    out = poses.copy()
+    Ri = poses[:, :3, :3]
+    ti = poses[:, :3, 3]
+    out[:, :3, :3] = r @ Ri
+    out[:, :3, 3] = (r @ (s * ti.T)).T + t
+    return out
+
+def _median_nn_thresh(pose_ref, pose_est_aligned):
+    P_ref = pose_ref[:, :3, 3]
+    P_est = pose_est_aligned[:, :3, 3]
+    dists = []
+    for p in P_est:
+        dd = np.linalg.norm(P_ref - p[None, :], axis=1)
+        dists.append(dd.min())
+    return float(np.median(dists)) if dists else 0.0
+
+def _ransac_align_sim3(
+    pose_ref, pose_est, sub_n=None, inlier_thresh=None, max_iters=10, random_state=None
+):
+    rng = np.random.default_rng(random_state)
+    N = pose_ref.shape[0]
+    idx_all = np.arange(N)
+    if sub_n is None:
+        sub_n = max(3, (N + 1) // 2)
+    else:
+        sub_n = max(3, min(sub_n, N))
+
+    # Pre-alignment + default threshold
+    r0, t0, s0, pose_est0 = _umeyama_sim3_from_paths(pose_ref, pose_est)
+    if inlier_thresh is None:
+        inlier_thresh = _median_nn_thresh(pose_ref, pose_est0)
+
+    P_ref_all = pose_ref[:, :3, 3]
+
+    best_model = (r0, t0, s0)
+    best_inliers = None
+    best_score = (-1, np.inf)  # (num_inliers, mean_err)
+
+    for _ in range(max_iters):
+        sample = rng.choice(idx_all, size=sub_n, replace=False)
+        try:
+            r, t, s, _ = _umeyama_sim3_from_paths(pose_ref[sample], pose_est[sample])
+        except Exception:
+            continue
+        pose_h = _apply_sim3_to_poses(pose_est, r, t, s)
+        P_h = pose_h[:, :3, 3]
+        errs = np.linalg.norm(P_h - P_ref_all, axis=1)  # Match by same index
+        inliers = errs <= inlier_thresh
+        k = int(inliers.sum())
+        mean_err = float(errs[inliers].mean()) if k > 0 else np.inf
+        if (k > best_score[0]) or (k == best_score[0] and mean_err < best_score[1]):
+            best_score = (k, mean_err)
+            best_model = (r, t, s)
+            best_inliers = inliers
+
+    # Fit again with best inliers
+    if best_inliers is not None and best_inliers.sum() >= 3:
+        r, t, s, _ = _umeyama_sim3_from_paths(pose_ref[best_inliers], pose_est[best_inliers])
+    else:
+        r, t, s = best_model
+    return r, t, s
+
+
+def align_poses_umeyama(
+    ext_ref: np.ndarray,
+    ext_est: np.ndarray,
+    return_aligned=False,
+    ransac=False,
+    sub_n=None,
+    inlier_thresh=None,
+    ransac_max_iters=10,
+    random_state=None,
+):
+    """
+    Align estimated trajectory to reference using Umeyama Sim(3).
+    Default no RANSAC; if ransac=True, use RANSAC (max iterations default 10).
+    - sub_n defaults to half the number of frames (rounded up, at least 3)
+    - inlier_thresh defaults to median of "distance from each estimated pose to
+      nearest reference pose after pre-alignment"
+    Returns rotation (3x3), translation (3,), scale; optionally returns aligned extrinsics (4x4).
+    """
+    pose_ref, pose_est = _poses_from_ext(ext_ref, ext_est)
+
+    if not ransac:
+        r, t, s, pose_est_aligned = _umeyama_sim3_from_paths(pose_ref, pose_est)
+    else:
+        r, t, s = _ransac_align_sim3(
+            pose_ref,
+            pose_est,
+            sub_n=sub_n,
+            inlier_thresh=inlier_thresh,
+            max_iters=ransac_max_iters,
+            random_state=random_state,
+        )
+        pose_est_aligned = _apply_sim3_to_poses(pose_est, r, t, s)
+
+    if return_aligned:
+        ext_est_aligned = affine_inverse_np(pose_est_aligned)
+        return r, t, s, ext_est_aligned
+    return r, t, s
+
