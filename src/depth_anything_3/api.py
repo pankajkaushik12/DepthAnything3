@@ -122,13 +122,11 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         Returns:
             Dictionary containing model predictions
         """
-        # Determine optimal autocast dtype
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        # Disable autocast during ONNX export. Mixed-precision tracing introduces unsupported dtype/cast operations in the exported graph, preventing successful export
         with torch.no_grad():
-            with torch.autocast(device_type=image.device.type, dtype=autocast_dtype):
-                return self.model(
-                    image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
-                )
+            return self.model(
+                image, extrinsics, intrinsics, export_feat_layers, infer_gs, use_ray_pose, ref_view_strategy
+            )
 
     def preprocess(
         self,
