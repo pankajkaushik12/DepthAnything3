@@ -230,8 +230,8 @@ class DPT(nn.Module):
         fused = self._fuse(resized_feats)
 
         # 3) Upsample to target resolution, optionally add position encoding again
-        h_out = int(ph * self.patch_size / self.down_ratio)
-        w_out = int(pw * self.patch_size / self.down_ratio)
+        h_out = ph * self.patch_size // self.down_ratio
+        w_out = pw * self.patch_size // self.down_ratio
 
         fused = self.scratch.output_conv1(fused)
         fused = custom_interpolate(fused, (h_out, w_out), mode="bilinear", align_corners=True)
@@ -330,7 +330,13 @@ class DPT(nn.Module):
     def _add_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """Simple UV position encoding directly added to feature map."""
         pw, ph = x.shape[-1], x.shape[-2]
-        pe = create_uv_grid(pw, ph, aspect_ratio=W / H, dtype=x.dtype, device=x.device)
+
+        # Convert image dimensions to tensors before division so the aspect ratio remains symbolic during ONNX export instead of being folded into a constant.
+        W_t = torch.tensor(W, dtype=torch.float32, device=x.device)
+        H_t = torch.tensor(H, dtype=torch.float32, device=x.device)
+        aspect_ratio = W_t / H_t
+
+        pe = create_uv_grid(pw, ph, aspect_ratio=aspect_ratio, dtype=x.dtype, device=x.device)
         pe = position_grid_to_embed(pe, x.shape[1]) * ratio
         pe = pe.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
         return x + pe

@@ -230,8 +230,8 @@ class DualDPT(nn.Module):
         fused_main, fused_aux_pyr = self._fuse(resized_feats)
 
         # 3) Upsample to target resolution and (optional) add pos-embed again
-        h_out = int(ph * self.patch_size / self.down_ratio)
-        w_out = int(pw * self.patch_size / self.down_ratio)
+        h_out = ph * self.patch_size // self.down_ratio
+        w_out = pw * self.patch_size // self.down_ratio
 
         fused_main = custom_interpolate(
             fused_main, (h_out, w_out), mode="bilinear", align_corners=True
@@ -314,7 +314,7 @@ class DualDPT(nn.Module):
         """Simple UV positional embedding added to feature maps."""
         pw, ph = x.shape[-1], x.shape[-2]
 
-        # Convert W and H to float tensors before division to dodge the `int_truediv` SymPy crash on symbolic proxies.
+        # Convert image dimensions to tensors before division so the aspect ratio remains symbolic during ONNX export instead of being folded into a constant.
         W_t = torch.tensor(W, dtype=torch.float32, device=x.device)
         H_t = torch.tensor(H, dtype=torch.float32, device=x.device)
         aspect_ratio = W_t / H_t

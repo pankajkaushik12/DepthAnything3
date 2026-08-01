@@ -214,7 +214,7 @@ def custom_interpolate(
     """
     if size is None:
         assert scale_factor is not None, "Either size or scale_factor must be provided."
-        size = (int(x.shape[-2] * scale_factor), int(x.shape[-1] * scale_factor))
+        size = (x.shape[-2] * scale_factor, x.shape[-1] * scale_factor)
 
     INT_MAX = 1610612736
     total = size[0] * size[1] * x.shape[0] * x.shape[1]
