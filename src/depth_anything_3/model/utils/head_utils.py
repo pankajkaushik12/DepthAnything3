@@ -148,6 +148,14 @@ def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 10
 
 # Inspired by https://github.com/microsoft/moge
 
+def dynamic_linspace(start, end, steps, dtype, device):
+    if steps == 1:
+        return start.unsqueeze(0)
+
+    t = torch.arange(steps, dtype=dtype, device=device)
+    t = t / (steps - 1)
+
+    return start + (end - start) * t
 
 def create_uv_grid(
     width: int,
@@ -189,8 +197,8 @@ def create_uv_grid(
     bottom_y = span_y * (height - 1) / height
 
     # Generate 1D coordinates
-    x_coords = torch.linspace(left_x, right_x, steps=width, dtype=dtype, device=device)
-    y_coords = torch.linspace(top_y, bottom_y, steps=height, dtype=dtype, device=device)
+    x_coords = dynamic_linspace(left_x, right_x, width, dtype, device)
+    y_coords = dynamic_linspace(top_y, bottom_y, height, dtype, device)
 
     # Create 2D meshgrid (width x height) and stack into UV
     uu, vv = torch.meshgrid(x_coords, y_coords, indexing="xy")
