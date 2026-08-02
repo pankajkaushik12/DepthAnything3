@@ -1,13 +1,5 @@
 import numpy as np
 import cv2
-from dataclasses import dataclass
-
-@dataclass
-class Prediction:
-    depth: np.ndarray  # N, H, W
-    conf: np.ndarray | None = None  # N, H, W
-    extrinsics: np.ndarray | None = None  # N, 4, 4
-    intrinsics: np.ndarray | None = None  # N, 3, 3
 
 def transpose_last_two_axes(arr: np.ndarray):
     """
@@ -192,7 +184,6 @@ def _umeyama_sim3_from_paths(pose_ref, pose_est):
     r, t, s, pose_est_aligned = _umeyama_sim3_from_paths_evo_rep(pose_ref, pose_est, with_scale=True)
     return r, t, s, pose_est_aligned
 
-
 def _apply_sim3_to_poses(poses, r, t, s):
     out = poses.copy()
     Ri = poses[:, :3, :3]
@@ -255,7 +246,6 @@ def _ransac_align_sim3(
     else:
         r, t, s = best_model
     return r, t, s
-
 
 def align_poses_umeyama(
     ext_ref: np.ndarray,
