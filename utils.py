@@ -1,5 +1,5 @@
 import numpy as np
-import cv2
+import matplotlib
 
 def transpose_last_two_axes(arr: np.ndarray):
     """
@@ -24,67 +24,54 @@ def affine_inverse_np(A: np.ndarray):
         axis=-2,
     )
 
-def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentile=2, ret_minmax=False, ret_type=np.uint8, colormap=cv2.COLORMAP_TURBO,):
+def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentile=2, ret_minmax=False, ret_type=np.uint8, cmap="Spectral",):
     """
-    Visualize a depth map using an OpenCV colormap.
+    Visualize a depth map using a colormap.
 
     Args:
-        depth: Input depth map (H, W)
-        depth_min: Minimum inverse-depth value for normalization.
-        depth_max: Maximum inverse-depth value for normalization.
-        percentile: Percentile used when depth_min/max are not given.
-        ret_minmax: Whether to also return (depth_min, depth_max).
-        ret_type: np.uint8 or np.float32 / np.float64.
-        colormap: OpenCV colormap (e.g. cv2.COLORMAP_TURBO).
+        depth: Input depth map array
+        depth_min: Minimum depth value for normalization. If None, uses percentile
+        depth_max: Maximum depth value for normalization. If None, uses percentile
+        percentile: Percentile for min/max computation if not provided
+        ret_minmax: Whether to return min/max depth values
+        ret_type: Return array type (uint8 or float)
+        cmap: Matplotlib colormap name to use
 
     Returns:
-        (H, W, 3) RGB visualization.
+        Colored depth visualization as numpy array
+        If ret_minmax=True, also returns depth_min and depth_max
     """
     depth = depth.copy()
-
-    # inverse depth (disparity)
+    depth.copy()
     valid_mask = depth > 0
-    depth[valid_mask] = 1.0 / depth[valid_mask]
-
+    depth[valid_mask] = 1 / depth[valid_mask]
     if depth_min is None:
-        depth_min = (
-            np.percentile(depth[valid_mask], percentile)
-            if valid_mask.sum() > 10
-            else 0.0
-        )
-
+        if valid_mask.sum() <= 10:
+            depth_min = 0
+        else:
+            depth_min = np.percentile(depth[valid_mask], percentile)
     if depth_max is None:
-        depth_max = (
-            np.percentile(depth[valid_mask], 100 - percentile)
-            if valid_mask.sum() > 10
-            else 0.0
-        )
-
+        if valid_mask.sum() <= 10:
+            depth_max = 0
+        else:
+            depth_max = np.percentile(depth[valid_mask], 100 - percentile)
     if depth_min == depth_max:
-        depth_min -= 1e-6
-        depth_max += 1e-6
-
-    depth = ((depth - depth_min) / (depth_max - depth_min)).clip(0.0, 1.0)
-    depth = 1.0 - depth
-
+        depth_min = depth_min - 1e-6
+        depth_max = depth_max + 1e-6
+    cm = matplotlib.colormaps[cmap]
+    depth = ((depth - depth_min) / (depth_max - depth_min)).clip(0, 1)
+    depth = 1 - depth
+    img_colored_np = cm(depth[None], bytes=False)[:, :, :, 0:3]  # value from 0 to 1
     if ret_type == np.uint8:
-        gray = (depth * 255).astype(np.uint8)
-        colored = cv2.applyColorMap(gray, colormap)
-        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-
-    elif ret_type in (np.float32, np.float64):
-        gray = (depth * 255).astype(np.uint8)
-        colored = cv2.applyColorMap(gray, colormap)
-        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-        colored = colored.astype(ret_type) / 255.0
-
+        img_colored_np = (img_colored_np[0] * 255.0).astype(np.uint8)
+    elif ret_type == np.float32 or ret_type == np.float64:
+        img_colored_np = img_colored_np[0]
     else:
-        raise ValueError(f"Unsupported return type: {ret_type}")
-
+        raise ValueError(f"Invalid return type: {ret_type}")
     if ret_minmax:
-        return colored, depth_min, depth_max
-
-    return colored
+        return img_colored_np, depth_min, depth_max
+    else:
+        return img_colored_np
 
 def normalize_extrinsics(ex_t: np.ndarray | None) -> np.ndarray | None:
     """Normalize extrinsics"""
