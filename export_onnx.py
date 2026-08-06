@@ -26,7 +26,7 @@ class DA3ONNXWrapper(nn.Module):
         self.use_ray_pose = use_ray_pose
         self.ref_view_strategy = ref_view_strategy
 
-    def forward(self, image: torch.Tensor, extrinsics: Optional[torch.Tensor] = None, intrinsics: Optional[torch.Tensor] = None,) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, image: torch.Tensor, extrinsics: Optional[torch.Tensor] = None, intrinsics: Optional[torch.Tensor] = None,) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
         # Call the underlying DA3 forward pass
         out = self.model(
@@ -41,10 +41,11 @@ class DA3ONNXWrapper(nn.Module):
         # Unpack dictionary into a strict tuple for deterministic ONNX output names
         depth = out.get("depth", torch.empty(0, device=image.device))
         conf = out.get("depth_conf", torch.empty(0, device=image.device))
+        sky = out.get("sky", torch.empty(0, device=image.device))
         extrinsics_out = out.get("extrinsics", torch.empty(0, device=image.device))
         intrinsics_out = out.get("intrinsics", torch.empty(0, device=image.device))
 
-        return depth, conf, extrinsics_out, intrinsics_out
+        return depth, conf, sky, extrinsics_out, intrinsics_out
 
 def load_model(model_name: str = "depth-anything/DA3-BASE", device: str = "cpu") -> DepthAnything3:
     """
@@ -108,7 +109,7 @@ def export_onnx(
     dummy_inputs = (dummy_image, dummy_ext, dummy_int)
 
     input_names = ["image", "extrinsics_in", "intrinsics_in"]
-    output_names = ["depth", "depth_conf", "extrinsics_out", "intrinsics_out"]
+    output_names = ["depth", "depth_conf", "sky", "extrinsics_out", "intrinsics_out"]
     
     dynamic_axes = {
         "image": {1: "num_views", 3: "height", 4: "width"},
@@ -116,6 +117,7 @@ def export_onnx(
         "intrinsics_in": {1: "num_views"},
         "depth": {1: "num_views"},
         "depth_conf": {1: "num_views"},
+        "sky": {1: "num_views"},
         "extrinsics_out": {1: "num_views"},
         "intrinsics_out": {1: "num_views"},
     }
