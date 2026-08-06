@@ -333,8 +333,8 @@ class NestedDepthAnything3Net(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        extrinsics: torch.Tensor | None = None,
-        intrinsics: torch.Tensor | None = None,
+        extrinsics: torch.Tensor,
+        intrinsics: torch.Tensor,
         export_feat_layers: list[int] = [],
         infer_gs: bool = False,
         use_ray_pose: bool = False,
@@ -359,7 +359,7 @@ class NestedDepthAnything3Net(nn.Module):
         output = self.da3(
             x, extrinsics, intrinsics, export_feat_layers=export_feat_layers, infer_gs=infer_gs, use_ray_pose=use_ray_pose, ref_view_strategy=ref_view_strategy
         )
-        metric_output = self.da3_metric(x)
+        metric_output = self.da3_metric(x, extrinsics, intrinsics)
 
         # Apply metric scaling and alignment
         output = self._apply_metric_scaling(output, metric_output)
