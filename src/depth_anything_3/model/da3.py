@@ -125,9 +125,11 @@ class DepthAnything3Net(nn.Module):
         # (B, N), Extract the mask using the -1.0 flag (Invalid intrinsics or extrinsics are marked with -1.0)
         is_valid_cam = (extrinsics[..., 0, 0] != -1.0)
 
-        # Extract features using backbone
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
+        cam_token = None
+        if self.cam_enc is not None:
+            # Extract features using backbone
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                cam_token = self.cam_enc(extrinsics, intrinsics, x.shape[-2:])
 
         feats, aux_feats = self.backbone(
             x, cam_token=cam_token, is_valid_cam=is_valid_cam, export_feat_layers=export_feat_layers, ref_view_strategy=ref_view_strategy
@@ -144,11 +146,6 @@ class DepthAnything3Net(nn.Module):
                 output = self._process_camera_estimation(feats, H, W, output)
             if infer_gs:
                 output = self._process_gs_head(feats, H, W, output, x, extrinsics, intrinsics)
-        
-        output = self._process_mono_sky_estimation(output)    
-
-        # Extract auxiliary features if requested
-        output.aux = self._extract_auxiliary_features(aux_feats, export_feat_layers, H, W)
 
         return output
 

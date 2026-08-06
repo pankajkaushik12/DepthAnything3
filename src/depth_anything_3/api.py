@@ -38,6 +38,8 @@ from depth_anything_3.utils.io.output_processor import OutputProcessor
 from depth_anything_3.utils.logger import logger
 from depth_anything_3.utils.pose_align import align_poses_umeyama
 
+from utils import process_mono_sky_estimation_np
+
 torch.backends.cudnn.benchmark = False
 # logger.info("CUDNN Benchmark Disabled")
 
@@ -214,6 +216,9 @@ class DepthAnything3(nn.Module, PyTorchModelHubMixin):
         NumPy Post-processing.
         Takes NumPy outputs from inference and formats them into the Prediction object.
         """
+        # Process mono sky estimation in NumPy
+        np_outputs["depth"], np_outputs["depth_conf"] = process_mono_sky_estimation_np(depth=np_outputs["depth"], depth_conf=np_outputs.get("depth_conf", None), sky=np_outputs.get("sky", None))
+
         # Convert raw NumPy outputs to Prediction object
         prediction = self._convert_to_prediction(np_outputs)
 
