@@ -1,7 +1,11 @@
 import os
+import sys
 import argparse
 from typing import Optional
 import onnx
+
+sys.modules['xformers'] = None
+sys.modules['xformers.ops'] = None
 
 import torch
 import torch.nn as nn
