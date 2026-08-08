@@ -70,6 +70,65 @@ def process_mono_sky_estimation_np(depth: np.ndarray, depth_conf: np.ndarray | N
 
         return updated_depth, updated_conf
 
+def align_nested_depth_np(
+    main_depth: np.ndarray,
+    main_conf: np.ndarray,
+    metric_depth: np.ndarray,
+    metric_sky: np.ndarray,
+    intrinsics: np.ndarray | None,
+) -> tuple[np.ndarray, float]:
+    """
+    Pure NumPy implementation of DA3 Nested depth alignment.
+    Aligns the main relative depth map to the metric depth map using least squares.
+    """
+    # Apply metric scaling to the metric depth output using Intrinsics
+    if intrinsics is not None and intrinsics.shape[-2:] == (3, 3):
+        fx = intrinsics[..., 0, 0]
+        fy = intrinsics[..., 1, 1]
+        focal = (fx + fy) / 2.0
+        # Broadcast focal length over spatial dimensions
+        focal = focal.reshape(-1, 1, 1) if focal.ndim > 0 else focal
+        metric_depth = metric_depth * (focal / 300.0)
+    else:
+        print("WARNING: Intrinsics missing. Nested alignment will use unscaled metric depth.")
+
+    # Compute Sky Mask
+    non_sky_mask = metric_sky < 0.3
+    if np.sum(non_sky_mask) <= 10:
+        return main_depth, 1.0  # Fallback if no valid non-sky pixels
+
+    # Sample confidence to find median
+    conf_ns = main_conf[non_sky_mask]
+    if conf_ns.size > 100000:
+        conf_sampled = np.random.choice(conf_ns, 100000, replace=False)
+    else:
+        conf_sampled = conf_ns
+    median_conf = float(np.median(conf_sampled))
+
+    # Compute Alignment Mask
+    align_mask = (
+        (main_conf >= median_conf) & 
+        non_sky_mask & 
+        (metric_depth > 1e-2) & 
+        (main_depth > 1e-3)
+    )
+
+    valid_main = main_depth[align_mask]
+    valid_metric = metric_depth[align_mask]
+
+    if valid_main.size == 0:
+        return main_depth, 1.0  # Fallback
+
+    # Compute Least Squares Scale (a ≈ s * b) --> metric ≈ s * main
+    num = np.dot(valid_metric.ravel(), valid_main.ravel())
+    den = np.maximum(np.dot(valid_main.ravel(), valid_main.ravel()), 1e-12)
+    scale_factor = float(num / den)
+
+    # Apply Scale
+    aligned_depth = main_depth * scale_factor
+    
+    return aligned_depth, scale_factor
+
 def affine_inverse_np(A: np.ndarray):
     R = A[..., :3, :3]
     T = A[..., :3, 3:]
