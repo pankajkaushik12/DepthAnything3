@@ -1,5 +1,54 @@
 import numpy as np
-import matplotlib
+import cv2
+
+# 11 Anchor RGB color points for Matplotlib's 'Spectral' colormap
+_SPECTRAL_ANCHORS = np.array([
+    [158,   1,  66],  # #9e0142
+    [213,  62,  79],  # #d53e4f
+    [244, 109,  67],  # #f46d43
+    [253, 174,  97],  # #fdae61
+    [254, 224, 139],  # #fee08b
+    [255, 255, 191],  # #ffffbf
+    [230, 245, 152],  # #e6f598
+    [171, 221, 164],  # #abdda4
+    [102, 194, 165],  # #66c2a5
+    [ 50, 136, 189],  # #3288bd
+    [ 94,  79, 162],  # #5e4fa2
+], dtype=np.float32)
+
+_CV2_COLORMAPS = {
+            "inferno": cv2.COLORMAP_INFERNO,
+            "magma": cv2.COLORMAP_MAGMA,
+            "plasma": cv2.COLORMAP_PLASMA,
+            "viridis": cv2.COLORMAP_VIRIDIS,
+            "turbo": cv2.COLORMAP_TURBO,
+            "jet": cv2.COLORMAP_JET,
+            "cividis": cv2.COLORMAP_CIVIDIS,
+            "twilight": cv2.COLORMAP_TWILIGHT,
+            "rainbow": cv2.COLORMAP_RAINBOW,
+            "ocean": cv2.COLORMAP_OCEAN,
+            "summer": cv2.COLORMAP_SUMMER,
+            "autumn": cv2.COLORMAP_AUTUMN,
+            "winter": cv2.COLORMAP_WINTER,
+            "spring": cv2.COLORMAP_SPRING,
+            "cool": cv2.COLORMAP_COOL,
+            "hot": cv2.COLORMAP_HOT,
+            "bone": cv2.COLORMAP_BONE,
+            "hsv": cv2.COLORMAP_HSV,
+            "pink": cv2.COLORMAP_PINK,
+        }
+
+def _generate_spectral_lut() -> np.ndarray:
+    """Precompute a 256x3 uint8 Look-Up Table (LUT) for the 'Spectral' colormap."""
+    x_anchors = np.linspace(0, 1, len(_SPECTRAL_ANCHORS))
+    x_new = np.linspace(0, 1, 256)
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    for i in range(3):
+        lut[:, i] = np.clip(np.interp(x_new, x_anchors, _SPECTRAL_ANCHORS[:, i]), 0, 255).astype(np.uint8)
+    return lut
+
+# Cached LUT array (256, 3) for zero runtime overhead
+_SPECTRAL_LUT = _generate_spectral_lut()
 
 def transpose_last_two_axes(arr: np.ndarray):
     """
@@ -141,7 +190,7 @@ def affine_inverse_np(A: np.ndarray):
         axis=-2,
     )
 
-def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentile=2, ret_minmax=False, ret_type=np.uint8, cmap="Spectral",):
+def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentile=2, ret_minmax=False, ret_type=np.uint8, cmap: str = "Spectral",):
     """
     Visualize a depth map using a colormap.
 
@@ -152,14 +201,15 @@ def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentil
         percentile: Percentile for min/max computation if not provided
         ret_minmax: Whether to return min/max depth values
         ret_type: Return array type (uint8 or float)
-        cmap: Matplotlib colormap name to use
+        cmap: Colormap name ("Spectral", "Inferno", "Magma", "Turbo", "Jet",
+          "Viridis").
 
     Returns:
         Colored depth visualization as numpy array
         If ret_minmax=True, also returns depth_min and depth_max
     """
     depth = depth.copy()
-    depth.copy()
+    
     valid_mask = depth > 0
     depth[valid_mask] = 1 / depth[valid_mask]
     if depth_min is None:
@@ -175,20 +225,31 @@ def visualize_depth(depth: np.ndarray, depth_min=None, depth_max=None, percentil
     if depth_min == depth_max:
         depth_min = depth_min - 1e-6
         depth_max = depth_max + 1e-6
-    cm = matplotlib.colormaps[cmap]
+    
     depth = ((depth - depth_min) / (depth_max - depth_min)).clip(0, 1)
-    depth = 1 - depth
-    img_colored_np = cm(depth[None], bytes=False)[:, :, :, 0:3]  # value from 0 to 1
+    depth = 1 - depth   # Invert normalized inverse-depth so nearer regions appear warmer.
+
+    # Convert to 8-bit integer array for OpenCV colormap lookup
+    depth_uint8 = (depth * 255.0).astype(np.uint8)
+
+    cmap = cmap.lower()
+    if cmap == "spectral":
+        img_colored_rgb = _SPECTRAL_LUT[depth_uint8]
+    else:
+        selected_cmap = _CV2_COLORMAPS.get(cmap, cv2.COLORMAP_INFERNO)
+        colored_bgr = cv2.applyColorMap(depth_uint8, selected_cmap)
+        img_colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+
     if ret_type == np.uint8:
-        img_colored_np = (img_colored_np[0] * 255.0).astype(np.uint8)
-    elif ret_type == np.float32 or ret_type == np.float64:
-        img_colored_np = img_colored_np[0]
+        out_img = img_colored_rgb
+    elif ret_type in (np.float32, np.float64):
+        out_img = (img_colored_rgb / 255.0).astype(ret_type)
     else:
         raise ValueError(f"Invalid return type: {ret_type}")
+
     if ret_minmax:
-        return img_colored_np, depth_min, depth_max
-    else:
-        return img_colored_np
+        return out_img, depth_min, depth_max
+    return out_img
 
 def normalize_extrinsics(ex_t: np.ndarray | None) -> np.ndarray | None:
     """Normalize extrinsics"""
